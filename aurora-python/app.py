@@ -1,18 +1,16 @@
 import os
-import time
 import asyncio
 import google.generativeai as genai
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
+from playwright.async_api import async_playwright
 
 load_dotenv()
-
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-model = genai.GenerativeModel('gemini-2.0-flash')
-
+model = genai.GenerativeModel('gemini-1.5-flash-latest')
 app = FastAPI()
 
 class ChatRequest(BaseModel):
@@ -29,15 +27,32 @@ async def stream_gemini_response(message: str):
 @app.post("/api/chat")
 async def chat_handler(request: ChatRequest):
     generator = stream_gemini_response(request.message)
-    
-    response_headers = {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-        "X-Accel-Buffering": "no"
-    }
-    
-    return StreamingResponse(generator, headers=response_headers)
+    return StreamingResponse(generator, media_type="text/plain")
+
+@app.websocket("/ws/agent")
+async def agent_websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    async with async_playwright() as p:
+        browser = await p.webkit.launch(headless=True)
+        page = await browser.new_page()
+        
+        try:
+            await page.goto("https://www.google.com")
+
+            while True:
+                screenshot_bytes = await page.screenshot(type="jpeg", quality=70)
+                
+                await websocket.send_bytes(screenshot_bytes)
+                
+                await asyncio.sleep(0.5)
+
+        except WebSocketDisconnect:
+            print("Client disconnected.")
+        except Exception as e:
+            print(f"An error occurred: {e}")
+        finally:
+            print("Closing browser...")
+            await browser.close()
 
 app.add_middleware(
     CORSMiddleware,
