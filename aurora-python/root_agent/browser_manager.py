@@ -22,11 +22,11 @@ class BrowserManager:
         if self.page:
             self.current_url = url
             # Wait until the page is fully loaded and network is idle
-            await self.page.goto(url, wait_until="networkidle")
+            await self.page.goto(url, wait_until="load")
 
     async def get_screenshot(self):
         if self.page:
-            return await self.page.screenshot(type="jpeg", quality=70)
+            return await self.page.screenshot(type="jpeg", quality=70, timeout=60000)
         return None
 
     async def get_page_content_as_text(self):
