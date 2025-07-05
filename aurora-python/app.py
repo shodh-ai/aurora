@@ -1,177 +1,117 @@
+from dotenv import load_dotenv
+load_dotenv() # Load environment variables as early as possible
+
 import os
-import json
 import asyncio
-import google.generativeai as genai
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
-from playwright.async_api import async_playwright
-from typing import Dict, Any, Optional, List
+from pydantic import BaseModel
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types # Import types for Content
+import uuid # Import uuid for generating unique session IDs
 
-# Load environment variables and configure Google Generative AI
-load_dotenv()
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+from root_agent.agent import root_agent
+from root_agent.browser_manager import browser_manager
 
-# Initialize models
-root_model = genai.GenerativeModel('gemini-1.5-flash-latest')
-navigation_model = genai.GenerativeModel('gemini-1.5-flash-latest')
+# Verify that the API key is loaded
+if not os.getenv("GOOGLE_API_KEY"):
+    raise ValueError("GOOGLE_API_KEY not found in environment variables. Please ensure your .env file is correctly configured and located in the aurora-python directory.")
 
 app = FastAPI()
 
-# Store active browser sessions
-active_sessions = {}
-current_url = "https://www.google.com"  # Default URL
+# Initialize the session service globally
+session_service = InMemorySessionService()
+
+# Define the application name for ADK sessions
+APP_NAME = "aurora"
+
+# Dictionary to store session IDs per client host (for InMemorySessionService)
+# This needs to be global to persist across requests
+client_sessions = {}
+
+# Instantiate the Runner with the root_agent, app_name, and session_service.
+runner = Runner(
+    agent=root_agent, 
+    app_name=APP_NAME, 
+    session_service=session_service
+)
 
 class ChatRequest(BaseModel):
     message: str
 
-# Navigation agent prompt template
-NAVIGATION_AGENT_PROMPT = """
-You are a website navigation agent. Your job is to analyze user requests and determine if they require visiting a specific website.
-If the user wants to visit a website or perform actions on a specific site (like booking tickets, shopping, etc.), extract:
-1. The website URL the user wants to visit
-2. The specific action they want to perform (if any)
+@app.on_event("startup")
+async def startup_event():
+    # Start the browser when the application starts
+    asyncio.create_task(browser_manager.start_browser())
 
-Output your response in this exact JSON format:
-{
-    "requires_navigation": true/false,
-    "url": "full URL including https://",
-    "action": "brief description of what the user wants to do",
-    "explanation": "brief explanation of your decision"
-}
+@app.on_event("shutdown")
+async def shutdown_event():
+    # Close the browser when the application stops
+    await browser_manager.close_browser()
 
-If no website navigation is needed, set "requires_navigation" to false and leave "url" as an empty string.
-Be specific with URLs - if the user mentions a specific website (like "bookmyshow"), provide the complete URL (like "https://in.bookmyshow.com").
-"""
-
-async def analyze_navigation_intent(message: str) -> Dict[str, Any]:
-    """Use the navigation agent to extract navigation intent from user message"""
-    try:
-        navigation_chat = navigation_model.start_chat(history=[])
-        response = await navigation_chat.send_message_async(
-            f"{NAVIGATION_AGENT_PROMPT}\n\nUser request: {message}"
+async def stream_agent_response(message: str, client_host: str):
+    """Stream responses from the root agent using the ADK Runner."""
+    user_id = f"user_{client_host}"
+    
+    # Get or create session ID for this client host
+    if user_id not in client_sessions:
+        session_id = str(uuid.uuid4())
+        client_sessions[user_id] = session_id
+        # Create a new session in InMemorySessionService
+        session_service.create_session(
+            app_name=APP_NAME, 
+            user_id=user_id, 
+            session_id=session_id, 
+            state={}
         )
-        # Try to parse the response as JSON
-        response_text = response.text
-        # Find JSON content within the response if it exists
-        start_idx = response_text.find('{')
-        end_idx = response_text.rfind('}') + 1
-        
-        if start_idx >= 0 and end_idx > start_idx:
-            json_text = response_text[start_idx:end_idx]
-            try:
-                return json.loads(json_text)
-            except json.JSONDecodeError:
-                print("Failed to parse JSON from navigation agent response")
-                
-        # Default response if JSON parsing fails
-        return {
-            "requires_navigation": False,
-            "url": "",
-            "action": "",
-            "explanation": "Failed to parse navigation intent"
-        }
-    except Exception as e:
-        print(f"Error in navigation intent analysis: {e}")
-        return {
-            "requires_navigation": False,
-            "url": "",
-            "action": "",
-            "explanation": f"Error: {str(e)}"
-        }
+        print(f"Created new session for {user_id}: {session_id}")
+    else:
+        session_id = client_sessions[user_id]
+        print(f"Continuing session for {user_id}: {session_id}")
 
-async def stream_root_agent_response(message: str, session_id: str):
-    """Stream responses from the root agent with navigation capability"""
-    chat = root_model.start_chat(history=[])
+    # Create a new message in the correct format
+    new_message_content = types.Content(role="user", parts=[types.Part(text=message)])
     
-    # First, analyze navigation intent
-    navigation_result = await analyze_navigation_intent(message)
-    requires_navigation = navigation_result.get("requires_navigation", False)
-    navigation_url = navigation_result.get("url", "")
-    
-    # If navigation is required, update the browser
-    if requires_navigation and navigation_url:
-        global current_url
-        current_url = navigation_url
-        # Update any active browser session
-        if session_id in active_sessions:
-            browser_page = active_sessions[session_id].get("page")
-            if browser_page:
-                try:
-                    await browser_page.goto(navigation_url)
-                    print(f"Navigated to: {navigation_url}")
-                except Exception as e:
-                    print(f"Navigation error: {e}")
-    
-    # Prepare a context-aware response for the root agent
-    navigation_context = ""
-    if requires_navigation:
-        navigation_context = f"\n\nI've detected a website navigation intent and am directing the browser to {navigation_url}."
-    
-    # Generate the user-facing response
-    root_prompt = f"""
-    The user asked: "{message}"
-    
-    {navigation_context if requires_navigation else ""}
-    
-    Please respond to the user appropriately. If you're navigating to a website, let them know.
-    """
-    
-    response = chat.send_message(root_prompt, stream=True)
-    for chunk in response:
-        if text := chunk.text:
-            yield text
-            await asyncio.sleep(0.01)
+    # The runner.run_async() method returns an async generator of events
+    async for event in runner.run_async(
+        user_id=user_id, 
+        session_id=session_id, 
+        new_message=new_message_content
+    ):
+        # Check if the event has content and parts, and if the part has text
+        if event.content and event.content.parts:
+            for part in event.content.parts:
+                if hasattr(part, "text") and part.text:
+                    yield part.text
 
 @app.post("/api/chat")
 async def chat_handler(request: ChatRequest, req: Request):
-    """Handle chat requests and potential navigation"""
-    # Generate a session ID from the client's IP address if needed
+    """Handle chat requests and stream agent responses."""
     client_host = req.client.host
-    session_id = f"session_{client_host}"
-    
-    generator = stream_root_agent_response(request.message, session_id)
+    generator = stream_agent_response(request.message, client_host)
     return StreamingResponse(generator, media_type="text/plain")
 
 @app.websocket("/ws/agent")
 async def agent_websocket_endpoint(websocket: WebSocket):
+    """Handle the WebSocket connection for streaming the browser view."""
     await websocket.accept()
-    session_id = f"session_{websocket.client.host}"
-    
-    async with async_playwright() as p:
-        browser = await p.webkit.launch(headless=True)
-        page = await browser.new_page()
-        
-        # Store the page reference for navigation from chat responses
-        active_sessions[session_id] = {
-            "page": page,
-            "browser": browser
-        }
-        
-        try:
-            # Navigate to the current global URL (may have been set by chat)
-            await page.goto(current_url)
-            
-            while True:
-                screenshot_bytes = await page.screenshot(type="jpeg", quality=70)
+    try:
+        while True:
+            screenshot_bytes = await browser_manager.get_screenshot()
+            if screenshot_bytes:
                 await websocket.send_bytes(screenshot_bytes)
-                await asyncio.sleep(0.5)
-                
-        except WebSocketDisconnect:
-            print("Client disconnected.")
-        except Exception as e:
-            print(f"An error occurred: {e}")
-        finally:
-            print("Closing browser...")
-            if session_id in active_sessions:
-                del active_sessions[session_id]
-            await browser.close()
+            await asyncio.sleep(0.5) # Adjust sleep time as needed
+    except WebSocketDisconnect:
+        print("Client disconnected.")
+    except Exception as e:
+        print(f"An error occurred in WebSocket: {e}")
 
+# Add CORS middleware to allow requests from the frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000"], # Adjust for your frontend URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -179,4 +119,5 @@ app.add_middleware(
 
 if __name__ == "__main__":
     import uvicorn
+    # Run the FastAPI application
     uvicorn.run(app, host="0.0.0.0", port=8000)
