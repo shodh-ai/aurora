@@ -1,5 +1,5 @@
-
 import asyncio
+import traceback
 from playwright.async_api import async_playwright
 
 class BrowserManager:
@@ -35,4 +35,34 @@ class BrowserManager:
             return await self.page.inner_text('body')
         return None
 
+    async def execute_interaction(self, interaction_code: str):
+        if not self.page:
+            return "Browser not initialized."
+        try:
+            # The user code is a series of await calls. We wrap it in an async function.
+            code_to_exec = (
+                "async def __interaction():\n" +
+                "\n".join(f"    {line}" for line in interaction_code.splitlines())
+            )
+            
+            # The 'page' object will be available in the scope of the exec function
+            exec_scope = {'page': self.page, 'asyncio': asyncio}
+            
+            # Define the __interaction function inside the scope
+            exec(code_to_exec, exec_scope)
+            
+            # Get the function from the scope
+            interaction_func = exec_scope['__interaction']
+            
+            # Now, await the function call
+            await interaction_func()
+
+            return "Interaction executed successfully."
+        except Exception as e:
+            print(f"An error occurred during interaction: {traceback.format_exc()}")
+            return f"An error occurred during interaction: {traceback.format_exc()}"
+
 browser_manager = BrowserManager()
+
+
+
