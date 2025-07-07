@@ -71,8 +71,20 @@ async def stream_agent_response(message: str, client_host: str):
         session_id = client_sessions[user_id]
         print(f"Continuing session for {user_id}: {session_id}")
 
-    # Create a new message in the correct format
-    new_message_content = types.Content(role="user", parts=[types.Part(text=message)])
+    # Get the latest screenshot
+    screenshot_bytes = await browser_manager.get_screenshot()
+    
+    parts = [types.Part(text=message)]
+    if screenshot_bytes:
+        screenshot_part = types.Part(
+            inline_data=types.Blob(
+                mime_type="image/jpeg",
+                data=screenshot_bytes
+            )
+        )
+        parts.insert(0, screenshot_part)
+
+    new_message_content = types.Content(role="user", parts=parts)
     
     # The runner.run_async() method returns an async generator of events
     async for event in runner.run_async(
