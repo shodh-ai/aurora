@@ -111,9 +111,11 @@ async def agent_websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
+            print("--- Starting get_screenshot (for frontend) ---")
             screenshot_bytes = await browser_manager.get_screenshot()
             if screenshot_bytes:
                 await websocket.send_bytes(screenshot_bytes)
+            print("--- Finished get_screenshot (for frontend) ---")
             await asyncio.sleep(0.5) # Adjust sleep time as needed
     except WebSocketDisconnect:
         print("Client disconnected.")
