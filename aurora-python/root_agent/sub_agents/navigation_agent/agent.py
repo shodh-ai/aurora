@@ -22,7 +22,7 @@ Be specific with URLs - if the user mentions a specific website (like "bookmysho
 
 navigation_agent = Agent(
     name="navigation_agent",
-    model="gemini-1.5-flash-latest",
+    model="gemini-2.5-flash",
     description="Analyzes user requests to determine if they require website navigation.",
     instruction=NAVIGATION_AGENT_PROMPT,
 )

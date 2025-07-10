@@ -3,17 +3,30 @@ load_dotenv() # Load environment variables as early as possible
 
 import os
 import asyncio
+import base64
+import json
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
-from google.genai import types # Import types for Content
-import uuid # Import uuid for generating unique session IDs
+from google.genai import types
+import uuid
 
 from root_agent.agent import root_agent
 from root_agent.browser_manager import browser_manager
+
+# Monkey-patch json.JSONEncoder.default to handle bytes
+_original_default = json.JSONEncoder().default
+def _new_default(obj):
+    if isinstance(obj, bytes):
+        # The ADK telemetry tries to serialize the request, which fails on bytes.
+        # We encode bytes to a base64 string to make it serializable.
+        return base64.b64encode(obj).decode("utf-8")
+    return _original_default(obj)
+
+json.JSONEncoder.default = lambda self, obj: _new_default(obj)
 
 # Verify that the API key is loaded
 if not os.getenv("GOOGLE_API_KEY"):
@@ -53,7 +66,10 @@ async def shutdown_event():
 
 async def stream_agent_response(message: str, client_host: str):
     """Stream responses from the root agent using the ADK Runner."""
+    print(f"--- STREAM AGENT RESPONSE ---")
+    print(f"Received message: {message}")
     user_id = f"user_{client_host}"
+    print(f"User ID: {user_id}")
     
     # Get or create session ID for this client host
     if user_id not in client_sessions:
@@ -71,20 +87,25 @@ async def stream_agent_response(message: str, client_host: str):
         session_id = client_sessions[user_id]
         print(f"Continuing session for {user_id}: {session_id}")
 
+    # The agent will now be responsible for getting its own screenshots.
     # Get the latest screenshot
     screenshot_bytes = await browser_manager.get_screenshot()
     
     parts = [types.Part(text=message)]
     if screenshot_bytes:
+        screenshot_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
         screenshot_part = types.Part(
             inline_data=types.Blob(
                 mime_type="image/jpeg",
                 data=screenshot_bytes
             )
         )
+        print(f"type of data in blob: {type(screenshot_part.inline_data.data)}")
         parts.insert(0, screenshot_part)
 
     new_message_content = types.Content(role="user", parts=parts)
+    print(f"Content sent to runner: {new_message_content}")
+    print("--------------------------")
     
     # The runner.run_async() method returns an async generator of events
     async for event in runner.run_async(
@@ -112,6 +133,7 @@ async def agent_websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             print("--- Starting get_screenshot (for frontend) ---")
+            # This call now also updates browser_manager.last_sent_screenshot_bytes
             screenshot_bytes = await browser_manager.get_screenshot()
             if screenshot_bytes:
                 await websocket.send_bytes(screenshot_bytes)
