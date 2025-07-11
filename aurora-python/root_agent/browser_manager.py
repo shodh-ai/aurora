@@ -68,19 +68,25 @@ class BrowserManager:
                 role = await element.get_attribute("role")
                 placeholder = await element.get_attribute("placeholder")
                 data_testid = await element.get_attribute("data-testid")
+                title = await element.get_attribute("title")
+                alt = await element.get_attribute("alt")
                 
                 # Attempt to create a robust locator
                 locator_parts = []
                 if aria_label:
                     locator_parts.append(f"page.get_by_label('{aria_label}')")
                 if role:
-                    locator_parts.append(f"page.get_by_role('{role}', name='{text_content or aria_label or ''}', exact=False)")
+                    locator_parts.append(f"page.get_by_role('{role}', name='{text_content or aria_label or title or alt or ''}', exact=False)")
                 if text_content and tag_name in ["button", "a"]:
                     locator_parts.append(f"page.get_by_text('{text_content}', exact=False)")
                 if placeholder:
                     locator_parts.append(f"page.get_by_placeholder('{placeholder}')")
                 if data_testid:
                     locator_parts.append(f"page.get_by_test_id('{data_testid}')")
+                if title:
+                    locator_parts.append(f"page.get_by_title('{title}')")
+                if alt:
+                    locator_parts.append(f"page.get_by_alt_text('{alt}')")
                 
                 # Fallback to CSS selector if no specific locator can be formed
                 if not locator_parts:
@@ -95,6 +101,8 @@ class BrowserManager:
                     "role": role,
                     "placeholder": placeholder,
                     "data_testid": data_testid,
+                    "title": title,
+                    "alt": alt,
                     "locator": " or ".join(locator_parts)
                 })
             except Exception as e:
