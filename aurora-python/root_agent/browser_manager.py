@@ -23,7 +23,7 @@ class BrowserManager:
         if self.page:
             self.current_url = url
             # Wait until the page is fully loaded and network is idle
-            await self.page.goto(url, wait_until="load")
+            await self.page.goto(url, wait_until="networkidle")
 
     async def get_screenshot(self):
         if self.page:
@@ -32,11 +32,12 @@ class BrowserManager:
             return screenshot_data
         return None
 
-    async def get_elements_info(self, selector: str = None) -> str:
+    async def get_elements_info(self, selector: str = None, limit: int = None) -> str:
         """Returns information about interactive elements on the current page, optionally filtered by a Playwright selector.
 
         Args:
             selector (str, optional): A Playwright selector string (e.g., 'button', 'input[type="text"]', 'div.some-class'). If provided, only elements matching this selector will be returned. Defaults to None.
+            limit (int, optional): The maximum number of elements to return. If provided, the function will return at most this many elements. Defaults to None.
         """
         if not self.page:
             return "Browser not initialized."
@@ -58,6 +59,8 @@ class BrowserManager:
                 elements.extend(await self.page.locator(s).all())
 
         for element in elements:
+            if limit is not None and len(elements_info) >= limit:
+                break
             try:
                 tag_name = await element.evaluate("el => el.tagName.toLowerCase()")
                 text_content = await element.text_content()

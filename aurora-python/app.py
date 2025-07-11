@@ -66,7 +66,7 @@ async def shutdown_event():
 
 async def stream_agent_response(message: str, client_host: str):
     """Stream responses from the root agent using the ADK Runner."""
-    print(f"--- STREAM AGENT RESPONSE ---")
+    print("\n--- NEW REQUEST ---")
     print(f"Received message: {message}")
     user_id = f"user_{client_host}"
     print(f"User ID: {user_id}")
@@ -87,24 +87,26 @@ async def stream_agent_response(message: str, client_host: str):
         session_id = client_sessions[user_id]
         print(f"Continuing session for {user_id}: {session_id}")
 
-    # The agent will now be responsible for getting its own screenshots.
-    # Get the latest screenshot
-    screenshot_bytes = await browser_manager.get_screenshot()
+    # The agent will now use the last screenshot that was sent to the frontend.
+    screenshot_bytes = browser_manager.last_sent_screenshot_bytes
     
     parts = [types.Part(text=message)]
     if screenshot_bytes:
-        screenshot_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
         screenshot_part = types.Part(
             inline_data=types.Blob(
                 mime_type="image/jpeg",
                 data=screenshot_bytes
             )
         )
-        print(f"type of data in blob: {type(screenshot_part.inline_data.data)}")
         parts.insert(0, screenshot_part)
 
     new_message_content = types.Content(role="user", parts=parts)
-    print(f"Content sent to runner: {new_message_content}")
+    print("\n--- CONTENT SENT TO RUNNER ---")
+    if screenshot_bytes:
+        print("New message content includes screenshot data.")
+    else:
+        print("New message content does not include screenshot data.")
+    print(f"Text message: {message}")
     print("--------------------------")
     
     # The runner.run_async() method returns an async generator of events
@@ -113,10 +115,27 @@ async def stream_agent_response(message: str, client_host: str):
         session_id=session_id, 
         new_message=new_message_content
     ):
+        print(f"\n--- EVENT FROM RUNNER ---")
+        # Only print the text content of the event to avoid logging large image strings
+        if event.content and event.content.parts:
+            for part in event.content.parts:
+                if hasattr(part, "text") and part.text:
+                    print(f"Event Text Part: {part.text}")
+                elif hasattr(part, "function_call") and part.function_call:
+                    print(f"Event Function Call: {part.function_call.name}")
+                elif hasattr(part, "function_response") and part.function_response:
+                    if part.function_response.name == "get_latest_screenshot":
+                        print(f"Event Function Response: {part.function_response.name}\nResponse: (Screenshot data - omitted for brevity)")
+                    else:
+                        print(f"Event Function Response: {part.function_response.name}\nResponse: {part.function_response.response}")
+        print("-------------------------")
         # Check if the event has content and parts, and if the part has text
         if event.content and event.content.parts:
             for part in event.content.parts:
                 if hasattr(part, "text") and part.text:
+                    print(f"\n--- RESPONSE TO USER ---")
+                    print(part.text)
+                    print("------------------------")
                     yield part.text
 
 @app.post("/api/chat")
@@ -132,12 +151,10 @@ async def agent_websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            print("--- Starting get_screenshot (for frontend) ---")
             # This call now also updates browser_manager.last_sent_screenshot_bytes
             screenshot_bytes = await browser_manager.get_screenshot()
             if screenshot_bytes:
                 await websocket.send_bytes(screenshot_bytes)
-            print("--- Finished get_screenshot (for frontend) ---")
             await asyncio.sleep(0.5) # Adjust sleep time as needed
     except WebSocketDisconnect:
         print("Client disconnected.")
